@@ -1,0 +1,7 @@
+---
+# etcd_management main entry point
+# By default, runs verify_health. Use include_role with tasks_from
+# to call specific tasks (remove_member, verify_health).
+
+- name: Verify etcd cluster health
+  ansible.builtin.include_tasks: verify_health.yml

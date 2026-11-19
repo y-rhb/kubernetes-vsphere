@@ -1,0 +1,59 @@
+---
+# Install and configure containerd
+# Pin to 1.7.x for kubeadm 1.29 compatibility (containerd 2.x breaks crictl/CRI)
+
+- name: Add Docker CE repository
+  yum_repository:
+    name: docker-ce-stable
+    description: Docker CE Stable - $basearch
+    baseurl: https://download.docker.com/linux/centos/$releasever/$basearch/stable
+    enabled: yes
+    gpgcheck: yes
+    gpgkey: https://download.docker.com/linux/centos/gpg
+    exclude: containerd.io-2*
+
+- name: Install containerd.io (pinned to 1.7.x)
+  dnf:
+    name: "{{ containerd_packages }}"
+    state: present
+    allow_downgrade: true
+
+- name: Create containerd config directory
+  file:
+    path: "{{ containerd_config_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Generate default containerd config
+  ansible.builtin.command:
+    cmd: containerd config default
+  register: containerd_default_config
+  changed_when: false
+
+- name: Deploy containerd config
+  ansible.builtin.copy:
+    content: "{{ containerd_default_config.stdout }}"
+    dest: "{{ containerd_config_dir }}/config.toml"
+    mode: '0644'
+  notify: Restart containerd
+
+- name: Set SystemdCgroup driver
+  ansible.builtin.replace:
+    path: "{{ containerd_config_dir }}/config.toml"
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  notify: Restart containerd
+
+- name: Set sandbox image to match kubeadm version
+  ansible.builtin.replace:
+    path: "{{ containerd_config_dir }}/config.toml"
+    regexp: 'sandbox_image = ".*"'
+    replace: 'sandbox_image = "registry.k8s.io/pause:3.9"'
+  notify: Restart containerd
+
+- name: Enable and start containerd
+  systemd:
+    name: containerd
+    state: started
+    enabled: yes
+    daemon_reload: yes

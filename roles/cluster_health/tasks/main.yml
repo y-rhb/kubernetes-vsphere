@@ -1,0 +1,131 @@
+---
+# Cluster health check
+# Must be executed on a healthy control plane node
+# Produces a structured fact: cluster_health_result
+
+# etcdctl n'est pas un binaire de l'hote + le sudo secure_path (durci CIS) exclut
+# /usr/local/bin -> on garantit sa presence AVANT les sondes etcd ci-dessous. Sinon
+# 'Check etcd health'/'Count etcd members' echouent (masque par failed_when:false) et
+# remontent des facts etcd FAUX. Rend cluster_health autonome + ordre-independant
+# (corrige le bug d'ordre cluster_health-avant-verify_health dans les day2-*.yml).
+- name: Ensure etcdctl is available before etcd probes
+  ansible.builtin.include_role:
+    name: etcd_management
+    tasks_from: ensure_etcdctl
+
+- name: Check API server via VIP
+  ansible.builtin.uri:
+    url: "https://{{ health_vip_address }}:{{ health_api_port }}/healthz"
+    validate_certs: true
+    ca_path: /etc/kubernetes/pki/ca.crt
+    return_content: true
+  register: api_health
+  failed_when: false
+
+- name: Get all nodes status
+  ansible.builtin.command:
+    cmd: kubectl get nodes -o json
+  register: nodes_json
+  changed_when: false
+  failed_when: false
+
+- name: Parse nodes status
+  ansible.builtin.set_fact:
+    cluster_nodes: >-
+      {{ (nodes_json.stdout | from_json)['items'] | default([]) | map(attribute='metadata') | list }}
+    cluster_nodes_status: >-
+      {{ (nodes_json.stdout | from_json)['items'] | default([])
+         | map(attribute='status')
+         | map(attribute='conditions')
+         | map('selectattr', 'type', 'equalto', 'Ready')
+         | map('first')
+         | list }}
+  when: nodes_json.rc == 0
+
+- name: Set empty nodes if API unreachable
+  ansible.builtin.set_fact:
+    cluster_nodes: []
+    cluster_nodes_status: []
+  when: nodes_json.rc != 0
+
+- name: Get kube-system pods status
+  ansible.builtin.command:
+    cmd: kubectl get pods -n kube-system -o json
+  register: system_pods_json
+  changed_when: false
+  failed_when: false
+
+- name: Check etcd health
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl endpoint health
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_health_check
+  changed_when: false
+  failed_when: false
+
+- name: Count etcd members
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl member list
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_member_list_check
+  changed_when: false
+  failed_when: false
+
+- name: Build health result
+  ansible.builtin.set_fact:
+    cluster_health_result:
+      api_server_reachable: "{{ api_health.status | default(0) == 200 }}"
+      api_server_response: "{{ api_health.content | default('unreachable') }}"
+      total_nodes: "{{ cluster_nodes | length }}"
+      ready_nodes: >-
+        {{ cluster_nodes_status
+           | selectattr('status', 'equalto', 'True')
+           | list | length }}
+      not_ready_nodes: >-
+        {{ cluster_nodes_status
+           | rejectattr('status', 'equalto', 'True')
+           | list | length }}
+      failed_node_names: >-
+        {% set failed = [] %}
+        {% for i in range(cluster_nodes | length) %}
+        {% if cluster_nodes_status[i].status | default('Unknown') != 'True' %}
+        {{ failed.append(cluster_nodes[i].name) }}
+        {% endif %}
+        {% endfor %}
+        {{ failed }}
+      etcd_healthy: "{{ etcd_health_check.rc == 0 }}"
+      etcd_member_count: >-
+        {{ etcd_member_list_check.stdout_lines
+           | default([])
+           | select('match', '^[0-9a-f]')
+           | list | length }}
+      system_pods_total: >-
+        {{ ((system_pods_json.stdout | default('{}') | from_json)['items'] | default([])) | length }}
+
+- name: Display cluster health report
+  ansible.builtin.debug:
+    msg:
+      - "========== CLUSTER HEALTH REPORT =========="
+      - "API Server (VIP {{ health_vip_address }}): {{ 'OK' if cluster_health_result.api_server_reachable else 'UNREACHABLE' }}"
+      - "Nodes: {{ cluster_health_result.ready_nodes }}/{{ cluster_health_result.total_nodes }} Ready"
+      - "etcd: {{ 'HEALTHY' if cluster_health_result.etcd_healthy else 'UNHEALTHY' }} ({{ cluster_health_result.etcd_member_count }} members)"
+      - "System pods: {{ cluster_health_result.system_pods_total }}"
+      - "Failed nodes: {{ cluster_health_result.failed_node_names }}"
+      - "============================================"
+
+- name: Fail if cluster is critically unhealthy
+  ansible.builtin.assert:
+    that:
+      - cluster_health_result.api_server_reachable
+    fail_msg: >-
+      Cluster API server is unreachable via VIP {{ health_vip_address }}.
+      Cannot proceed with Day 2 operations.
+  when: health_check_fail_on_critical | default(true)

@@ -1,0 +1,12 @@
+---
+# Containerd role default variables
+
+# Containerd packages
+containerd_packages:
+  - containerd.io
+
+# Containerd config directory
+containerd_config_dir: /etc/containerd
+
+# Use systemd cgroup driver (required for kubeadm)
+containerd_systemd_cgroup: true

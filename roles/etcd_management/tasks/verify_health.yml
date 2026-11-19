@@ -1,0 +1,101 @@
+---
+# Verify etcd cluster health
+# Must be executed on a healthy control plane node
+
+# etcdctl n'est pas un binaire de l'hote (il vit dans le pod etcd) -> on garantit
+# sa presence AVANT toute commande etcdctl. Point de passage oblige : remove_member
+# inclut ce fichier, et le day2 l'appelle en pre-flight comme en verification.
+- name: Ensure etcdctl is available on the host
+  ansible.builtin.include_tasks: ensure_etcdctl.yml
+
+- name: Check etcd endpoint health
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl endpoint health
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_health
+  changed_when: false
+  failed_when: false
+
+- name: List etcd members
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl member list
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+      -w table
+  register: etcd_members
+  changed_when: false
+
+# Plain (comma-separated) output: table rows start with '|' and would never
+# match the member-count pattern below — counting MUST use this plain listing.
+- name: List etcd members (parseable)
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl member list
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_members_plain
+  changed_when: false
+
+# --cluster probes every registered member endpoint; exits non-zero as soon as
+# one member is down, so the healthy count must be parsed from stdout instead
+# of relying on the return code.
+- name: Check health of all etcd member endpoints
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl endpoint health
+      --cluster
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_cluster_health
+  changed_when: false
+  failed_when: false
+
+- name: Check etcd endpoint status
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl endpoint status
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+      -w table
+  register: etcd_status
+  changed_when: false
+  failed_when: false
+
+- name: Display etcd health report
+  ansible.builtin.debug:
+    msg:
+      - "=== etcd Endpoint Health ==="
+      - "{{ etcd_health.stdout_lines | default(['Unable to check health']) }}"
+      - ""
+      - "=== etcd Members ==="
+      - "{{ etcd_members.stdout_lines | default(['Unable to list members']) }}"
+      - ""
+      - "=== etcd Endpoint Status ==="
+      - "{{ etcd_status.stdout_lines | default(['Unable to check status']) }}"
+      - ""
+      - "=== etcd Cluster-wide Endpoint Health ==="
+      - "{{ (etcd_cluster_health.stdout_lines + etcd_cluster_health.stderr_lines) | default(['Unable to probe cluster endpoints']) }}"
+
+- name: Set etcd health facts
+  ansible.builtin.set_fact:
+    etcd_is_healthy: "{{ etcd_health.rc == 0 }}"
+    etcd_member_count: "{{ etcd_members_plain.stdout_lines | select('match', '^[0-9a-f]+,') | list | length }}"
+    # Registered members include dead ones: only the healthy-endpoint count is a
+    # valid quorum guard ('is healthy' lines from the --cluster probe).
+    etcd_healthy_endpoint_count: >-
+      {{ (etcd_cluster_health.stdout_lines + etcd_cluster_health.stderr_lines)
+         | select('search', 'is healthy')
+         | list | length }}

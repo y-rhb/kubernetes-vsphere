@@ -1,0 +1,88 @@
+---
+# Drain a Kubernetes node and remove it from the cluster
+#
+# This role must be executed on a healthy control plane node.
+# It handles 3 cases:
+#   1. Node exists and is Ready -> cordon + graceful drain + delete
+#   2. Node exists but is NotReady -> cordon + delete (no eviction: with a dead
+#      kubelet, evictions never complete and would just burn drain_timeout)
+#   3. Node does not exist in K8s API -> skip drain, nothing to do
+#
+# Required variable: drain_target_node (K8s node name, lowercase)
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - drain_target_node is defined
+      - drain_target_node | length > 0
+    fail_msg: "drain_target_node must be defined and non-empty"
+
+- name: Check if node exists in the cluster
+  ansible.builtin.command:
+    cmd: kubectl get node {{ drain_target_node }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  register: node_status
+  failed_when: false
+  changed_when: false
+
+- name: Set node existence fact
+  ansible.builtin.set_fact:
+    node_exists: "{{ node_status.rc == 0 }}"
+    node_is_ready: "{{ node_status.stdout == 'True' }}"
+
+- name: Drain node
+  when: node_exists
+  block:
+    - name: Cordon node to prevent new pod scheduling
+      ansible.builtin.command:
+        cmd: kubectl cordon {{ drain_target_node }}
+      changed_when: true
+
+    - name: Drain node (graceful)
+      ansible.builtin.command:
+        cmd: >-
+          kubectl drain {{ drain_target_node }}
+          --timeout={{ drain_timeout }}s
+          {% if drain_ignore_daemonsets %}--ignore-daemonsets{% endif %}
+          {% if drain_delete_emptydir_data %}--delete-emptydir-data{% endif %}
+          {% if drain_force %}--force{% endif %}
+      register: drain_result
+      changed_when: true
+      # If drain fails (e.g. node already gone), we still want to delete it
+      failed_when: false
+      when: node_is_ready
+
+    - name: Skip eviction for NotReady node
+      ansible.builtin.debug:
+        msg: >-
+          Node {{ drain_target_node }} is NotReady (kubelet unreachable):
+          skipping eviction, deleting the Node object directly. Its pods will be
+          garbage-collected and rescheduled by their controllers.
+      when: not node_is_ready
+
+    - name: Warn if drain had issues
+      ansible.builtin.debug:
+        msg: "Drain returned non-zero (rc={{ drain_result.rc }}). Proceeding with node deletion. stderr: {{ drain_result.stderr | default('') }}"
+      when:
+        - node_is_ready
+        - drain_result.rc != 0
+
+    - name: Delete node from cluster
+      ansible.builtin.command:
+        cmd: kubectl delete node {{ drain_target_node }}
+      changed_when: true
+      when: drain_delete_node
+  rescue:
+    - name: Node drain/delete failed - fail with context
+      ansible.builtin.fail:
+        msg: >-
+          Drain/delete failed for node {{ drain_target_node }}.
+          Check: (1) kubectl reachability from this control plane,
+          (2) PodDisruptionBudgets blocking drain
+          ('kubectl get pdb -A'),
+          (3) stuck finalizers on Node object
+          ('kubectl get node {{ drain_target_node }} -o yaml').
+
+- name: Skip drain for non-existent node
+  ansible.builtin.debug:
+    msg: "Node {{ drain_target_node }} does not exist in the cluster, skipping drain"
+  when: not node_exists

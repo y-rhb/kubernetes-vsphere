@@ -1,0 +1,39 @@
+---
+# etcdctl n'est PAS un binaire de l'hote : il vit dans le conteneur du static-pod
+# etcd. Or les taches etcd_management (verify_health, remove_member) l'appellent
+# en direct -> il DOIT etre present sur le PATH. On l'installe dans /usr/local/bin
+# (PATH standard, y compris pour le module command), version alignee sur l'etcd du
+# cluster (registry.k8s.io/etcd:3.5.16-0, K8s 1.29). Idempotent (stat avant install).
+#
+# Pourquoi ici : le seul autre installeur (play snapshot_backup de site.yml) est
+# conditionne a `backups_age_recipient` -> etcd_management en dependait sans jamais
+# l'installer (couplage cache debusque par le game-day 2026-07). Ce fichier rend le
+# role autonome : verify_health/remove_member s'auto-suffisent, ou qu'ils tournent.
+
+- name: Check whether etcdctl is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/etcdctl
+  register: _etcdctl_bin
+
+- name: Install etcdctl v3.5.16 (absent from the host, lives in the etcd pod)
+  ansible.builtin.unarchive:
+    src: "https://github.com/etcd-io/etcd/releases/download/v3.5.16/etcd-v3.5.16-linux-amd64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts:
+      - "--strip-components=1"
+      - "etcd-v3.5.16-linux-amd64/etcdctl"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  when: not (_etcdctl_bin.stat.exists | default(false))
+
+# Garde-fou : si le download GitHub a foire (egress 443 KO, proxy, rate-limit), on
+# echoue ICI avec un message clair, plutot que de laisser 'etcdctl introuvable'
+# surgir 3 taches plus loin dans verify_health/cluster_health.
+- name: Assert etcdctl is installed and runnable
+  ansible.builtin.command:
+    cmd: /usr/local/bin/etcdctl version
+  register: _etcdctl_check
+  changed_when: false

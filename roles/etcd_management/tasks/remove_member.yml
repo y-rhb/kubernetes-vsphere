@@ -1,0 +1,96 @@
+---
+# Remove a failed etcd member from the cluster
+# Must be executed on a healthy control plane node
+#
+# Required variable: etcd_target_node_ip (IP of the node to remove)
+# The IP is used to identify the etcd member in the member list
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - etcd_target_node_ip is defined
+      - etcd_target_node_ip | length > 0
+    fail_msg: "etcd_target_node_ip must be defined and non-empty"
+
+- name: Verify etcd health before removal
+  ansible.builtin.include_tasks: verify_health.yml
+
+# Guard on HEALTHY endpoints, not registered members: the member list still
+# contains the dead node, so a raw member count would pass even with 2 CPs down.
+- name: Assert etcd quorum is safe for member removal
+  ansible.builtin.assert:
+    that:
+      - etcd_is_healthy
+      - etcd_healthy_endpoint_count | int >= 2
+    fail_msg: >-
+      Cannot remove etcd member: cluster is unhealthy or quorum would be lost.
+      Local endpoint healthy: {{ etcd_is_healthy }},
+      healthy endpoints: {{ etcd_healthy_endpoint_count }}/{{ etcd_member_count }} registered.
+      At least 2 members must be HEALTHY before removing one.
+
+- name: List etcd members to find target
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/etcdctl member list
+      --cacert {{ etcd_ca_cert }}
+      --cert {{ etcd_client_cert }}
+      --key {{ etcd_client_key }}
+      --endpoints {{ etcd_local_endpoint }}
+  register: etcd_member_list
+  changed_when: false
+
+- name: Identify target etcd member(s) by exact client URL
+  # Anchor on the exact client URL (https://<ip>:2379): regex_escape neutralizes
+  # the IP dots, and the :2379 port prevents a shorter octet (e.g. .6) from
+  # matching another member's .60/.61. Keep the full list (no blind first) so an
+  # ambiguous match is caught before we remove the wrong member.
+  ansible.builtin.set_fact:
+    etcd_target_member_ids: >-
+      {{ etcd_member_list.stdout_lines
+         | select('search', '://' ~ (etcd_target_node_ip | regex_escape) ~ ':2379')
+         | map('regex_replace', '^([0-9a-f]+),.*', '\1')
+         | map('trim')
+         | list }}
+
+- name: Fail if etcd member match is ambiguous
+  ansible.builtin.assert:
+    that:
+      - etcd_target_member_ids | length <= 1
+    fail_msg: >-
+      Multiple etcd members match client URL for IP {{ etcd_target_node_ip }}
+      ({{ etcd_target_member_ids | length }} matches) — refusing to guess.
+      Members: {{ etcd_member_list.stdout }}
+
+# 0 match = member already removed: no-op so a failed replacement run (e.g.
+# terraform error after the remove) can simply be re-run end to end.
+- name: Note if member is already absent (idempotent re-run)
+  ansible.builtin.debug:
+    msg: >-
+      No etcd member with client URL https://{{ etcd_target_node_ip }}:2379 —
+      already removed, skipping.
+  when: etcd_target_member_ids | length == 0
+
+- name: Remove etcd member
+  when: etcd_target_member_ids | length == 1
+  block:
+    - name: Set target etcd member ID
+      ansible.builtin.set_fact:
+        etcd_target_member_id: "{{ etcd_target_member_ids | first | trim }}"
+
+    - name: Remove etcd member
+      ansible.builtin.command:
+        cmd: >-
+          /usr/local/bin/etcdctl member remove {{ etcd_target_member_id }}
+          --cacert {{ etcd_ca_cert }}
+          --cert {{ etcd_client_cert }}
+          --key {{ etcd_client_key }}
+          --endpoints {{ etcd_local_endpoint }}
+      register: etcd_remove_result
+      changed_when: true
+
+    - name: Display removal result
+      ansible.builtin.debug:
+        msg: "etcd member {{ etcd_target_member_id }} (IP: {{ etcd_target_node_ip }}) removed successfully"
+
+- name: Verify etcd health after removal
+  ansible.builtin.include_tasks: verify_health.yml

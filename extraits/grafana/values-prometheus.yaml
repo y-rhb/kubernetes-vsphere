@@ -1,0 +1,14 @@
+# Valeurs pour le chart Helm Grafana, adaptées d’une configuration historique du projet.
+datasources:
+  prometheus.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: https://prometheus.example.invalid
+        isDefault: false
+        jsonData:
+          timeInterval: 30s
+          httpMethod: POST

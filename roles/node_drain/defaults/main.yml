@@ -1,0 +1,20 @@
+---
+# node_drain role default variables
+
+# Node name to drain (REQUIRED - must be passed as extra-var)
+# drain_target_node: ""
+
+# Drain timeout in seconds
+drain_timeout: 120
+
+# Ignore DaemonSet-managed pods during drain
+drain_ignore_daemonsets: true
+
+# Delete pods using emptyDir volumes
+drain_delete_emptydir_data: true
+
+# Force drain even if there are unmanaged pods
+drain_force: false
+
+# Delete the node from K8s API after drain
+drain_delete_node: true

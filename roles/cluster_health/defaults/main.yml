@@ -1,0 +1,15 @@
+---
+# cluster_health role default variables
+
+# VIP address for API server check
+health_vip_address: "{{ vip_address }}"
+
+# API server port
+health_api_port: 6443
+
+# etcd PKI (reused from etcd_management role defaults)
+etcd_cert_dir: /etc/kubernetes/pki/etcd
+etcd_ca_cert: "{{ etcd_cert_dir }}/ca.crt"
+etcd_client_cert: "{{ etcd_cert_dir }}/peer.crt"
+etcd_client_key: "{{ etcd_cert_dir }}/peer.key"
+etcd_local_endpoint: "https://127.0.0.1:2379"

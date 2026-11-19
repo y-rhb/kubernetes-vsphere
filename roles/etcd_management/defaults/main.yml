@@ -1,0 +1,16 @@
+---
+# etcd_management role default variables
+
+# etcd PKI directory (used for authentication with etcdctl)
+etcd_cert_dir: /etc/kubernetes/pki/etcd
+
+# etcd certificates for etcdctl
+etcd_ca_cert: "{{ etcd_cert_dir }}/ca.crt"
+etcd_client_cert: "{{ etcd_cert_dir }}/peer.crt"
+etcd_client_key: "{{ etcd_cert_dir }}/peer.key"
+
+# etcd endpoint (local to the CP running the task)
+etcd_local_endpoint: "https://127.0.0.1:2379"
+
+# Node to remove from etcd (REQUIRED for remove_member)
+# etcd_target_node_ip: ""
